@@ -1,223 +1,384 @@
 --[[
-PanelViewer - Visor de Imagen Personalizado para Paneles
+PanelViewer - A custom image viewer designed specifically for panel navigation
 
-Este widget es un visor de imágenes construido desde cero para la navegación
-específica por paneles de cómic. Se encarga de renderizar el panel,
-manejar los gestos de toque (tap) y asegurar que la experiencia sea fluida
-en dispositivos de tinta electrónica (E-Ink).
-
-Inspirado por las APIs de renderizado modernas, proporciona un control
-más fino sobre el posicionamiento, el escalado y las transiciones.
+This viewer is built from scratch using KOReader's widget system and APIs,
+inspired by modern image rendering patterns. It provides optimized panel
+viewing with custom padding, gesture handling, and smooth transitions.
 ]]
 
--- Dependencias de KOReader
 local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
 local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local RenderImage = require("ui/renderimage")
 local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
-
--- Utilidades
 local logger = require("logger")
 local _ = require("gettext")
 
--- ===================================================================
--- CLASE: PanelViewer
--- Un contenedor de entrada que muestra una imagen a pantalla completa
--- y responde a los toques para la navegación.
--- ===================================================================
 local PanelViewer = InputContainer:extend{
-    -- --- PROPIEDADES ---
+    -- Core properties
     name = "PanelViewer",
-    image = nil,                 -- La imagen del panel (un BlitBuffer) a mostrar
-    fullscreen = true,           -- Siempre se muestra a pantalla completa
-    reading_direction = "ltr", -- Sentido de lectura actual
-    custom_position = nil,       -- Posición personalizada para el centrado inteligente
-
-    -- --- CALLBACKS (Funciones de llamada) ---
-    -- Estas funciones son asignadas desde main.lua para conectar la UI con la lógica
+    
+    -- Image source (BlitBuffer or file path)
+    image = nil,
+    file = nil,
+    
+    -- Display properties
+    fullscreen = true,
+    buttons_visible = false,
+    
+    -- Panel-specific properties
+    reading_direction = "ltr",
+    panel_aspect_ratio = nil,  -- Panel aspect ratio from main.lua
+    
+    -- Callbacks for navigation
     onNext = nil,
     onPrev = nil,
     onClose = nil,
     
-    -- --- ESTADO INTERNO ---
-    _image_bb = nil,             -- Buffer de la imagen original
-    _display_rect = nil,         -- Rectángulo donde se dibujará la imagen en pantalla
+    -- Internal state
+    _image_bb = nil,
+    _rendered_size = nil,
+    _display_rect = nil,
+    _scaled_image_bb = nil, -- Cached scaled image for display
+    _is_dirty = false,
 }
 
---
--- FUNCIÓN: init()
--- Se ejecuta al crear una nueva instancia de PanelViewer.
---
 function PanelViewer:init()
-    -- 1. Configura las zonas de la pantalla que responderán a los toques
+    -- Initialize touch zones for navigation
     self:setupTouchZones()
-    -- 2. Carga y procesa la imagen del panel
+    
+    -- Load and process the image
     self:loadImage()
-    -- 3. Calcula dónde y de qué tamaño se va a dibujar la imagen
+    
+    -- Calculate display dimensions
     self:calculateDisplayRect()
+    
+    logger.info(string.format("PanelViewer: Initialized with image %dx%d", 
+        self._rendered_size and self._rendered_size.w or 0,
+        self._rendered_size and self._rendered_size.h or 0))
 end
 
---
--- FUNCIÓN: setupTouchZones()
--- Define las áreas en la pantalla para avanzar, retroceder o cerrar.
---
 function PanelViewer:setupTouchZones()
-    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
+    local screen_width = Screen:getWidth()
+    local screen_height = Screen:getHeight()
     
-    -- Creamos un único gestor de eventos para "Tap" que cubre toda la pantalla.
-    -- La lógica para decidir qué hacer (avanzar/retroceder/cerrar) se encuentra en onTap().
+    -- Define tap zones: Left 30% (prev), Right 30% (next), Center 40% (close)
     self.ges_events = {
         Tap = {
             GestureRange:new{
                 ges = "tap",
-                range = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h }
+                range = Geom:new{
+                    x = 0, y = 0,
+                    w = screen_width,
+                    h = screen_height
+                }
             }
         }
     }
 end
 
---
--- FUNCIÓN: loadImage()
--- Carga la imagen desde el BlitBuffer proporcionado por main.lua.
---
 function PanelViewer:loadImage()
-    if not self.image then
-        logger.warn("PanelViewer: No se ha proporcionado una imagen.")
+    if not self.image and not self.file then
+        logger.warn("PanelViewer: No image or file provided")
         return false
     end
-    self._image_bb = self.image
+    
+    local image_bb = nil
+    
+    -- Load from BlitBuffer
+    if self.image then
+        image_bb = self.image
+        logger.info("PanelViewer: Using provided BlitBuffer")
+    -- Load from file with screen-size decoding for sharp rendering
+    elseif self.file then
+        local screen_w = Screen:getWidth()
+        local screen_h = Screen:getHeight()
+        logger.info(string.format("PanelViewer: Loading image file at screen size %dx%d with dithering: %s", screen_w, screen_h, self.file))
+        -- Pass screen dimensions to MuPDF for high-quality scaling during decode
+        image_bb = RenderImage:renderImageFile(self.file, false, screen_w, screen_h)
+        if not image_bb then
+            logger.error("PanelViewer: Failed to load image file")
+            return false
+        end
+    end
+    
+    self._image_bb = image_bb
+    self._rendered_size = {
+        w = image_bb:getWidth(),
+        h = image_bb:getHeight()
+    }
+    
     return true
 end
 
---
--- FUNCIÓN: calculateDisplayRect()
--- Calcula el rectángulo de destino para la imagen del panel en la pantalla.
--- Utiliza la `custom_position` para el centrado inteligente.
---
 function PanelViewer:calculateDisplayRect()
     if not self._image_bb then return end
 
-    -- Si main.lua nos ha pasado una posición personalizada, la usamos.
-    -- Esto es clave para el "center-lock", que mantiene la estabilidad visual.
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+
+    local img_w = self._image_bb:getWidth()
+    local img_h = self._image_bb:getHeight()
+
+    local function round(x)
+        return math.floor(x + 0.5)
+    end
+
+    -- ðŸ”’ Center-lock mode (panel center matching)
     if self.custom_position then
         self._display_rect = {
             x = self.custom_position.x,
             y = self.custom_position.y,
-            w = self._image_bb:getWidth(),
-            h = self._image_bb:getHeight()
-        }
-    else
-        -- Si no, simplemente centramos la imagen en la pantalla (fallback).
-        local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
-        local img_w, img_h = self._image_bb:getWidth(), self._image_bb:getHeight()
-        self._display_rect = {
-            x = math.floor((screen_w - img_w) / 2 + 0.5),
-            y = math.floor((screen_h - img_h) / 2 + 0.5),
             w = img_w,
             h = img_h
         }
+        self._scaled_image_bb = self._image_bb
+        return
     end
+
+    -- Default: centered image
+    local display_x = round((screen_w - img_w) / 2)
+    local display_y = round((screen_h - img_h) / 2)
+
+    self._display_rect = {
+        x = display_x,
+        y = display_y,
+        w = img_w,
+        h = img_h
+    }
+
+    
+
+    logger.info(string.format(
+        "PanelViewer: Display rect %dx%d at (%d,%d) (1:1 blit)",
+        img_w, img_h, display_x, display_y
+    ))
 end
 
---
--- FUNCIÓN: onTap(_, ges)
--- Manejador de eventos de toque. Decide si avanzar, retroceder o cerrar.
---
 function PanelViewer:onTap(_, ges)
     if not ges or not ges.pos then return false end
     
-    -- Calculamos en qué porcentaje de la pantalla (horizontalmente) se ha tocado.
-    local x_pct = ges.pos.x / Screen:getWidth()
+    local screen_w = Screen:getWidth()
+    local x_pct = ges.pos.x / screen_w
     
-    -- La lógica de las zonas de toque depende del sentido de lectura.
+    -- Determine direction based on reading direction
     local is_rtl = self.reading_direction == "rtl"
-    local next_zone, prev_zone = 0.7, 0.3 -- Zonas para LTR (cómics occidentales)
-    if is_rtl then
-        next_zone, prev_zone = 0.3, 0.7 -- Zonas invertidas para RTL (manga)
-    end
     
-    if x_pct > next_zone then
+    -- Zone Logic: In RTL, Left is "Forward". In LTR, Right is "Forward".
+    local is_forward = (is_rtl and x_pct < 0.3) or (not is_rtl and x_pct > 0.7)
+    local is_backward = (is_rtl and x_pct > 0.7) or (not is_rtl and x_pct < 0.3)
+    
+    if is_forward then
+        logger.info("PanelViewer: Forward tap detected")
         if self.onNext then self.onNext() end
-    elseif x_pct < prev_zone then
+        return true
+    elseif is_backward then
+        logger.info("PanelViewer: Backward tap detected")
         if self.onPrev then self.onPrev() end
-    else
-        -- Si se toca en el centro, se cierra el visor.
-        if self.onClose then self.onClose() end
+        return true
     end
     
+    -- Center tap: Close the viewer
+    logger.info("PanelViewer: Center tap detected, closing viewer")
+    if self.onClose then self.onClose() end
     return true
 end
 
---
--- FUNCIÓN: paintTo(bb, x, y)
--- La función de dibujado principal del widget. Se llama cada vez que KOReader
--- necesita refrescar la pantalla.
---
 function PanelViewer:paintTo(bb, x, y)
-    if not self._image_bb or not self._display_rect then return end
+    if not self._image_bb or not self._scaled_image_bb then return end
     
-    -- Primero, pintamos todo el fondo de blanco para limpiar la pantalla anterior.
-    local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
-    bb:paintRect(0, 0, screen_w, screen_h, Blitbuffer.Color8(255))
+    -- Get screen-space rectangle (single source of truth)
+    local screen_rect = self:getScreenRect()
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+    local white_color = Blitbuffer.Color8(255)
+    local black_color = Blitbuffer.Color8(0)
+    
+    -- Paint entire background white
+   -- Top
+bb:paintRect(0, 0, screen_w, screen_rect.y, white_color)
+-- Bottom
+bb:paintRect(0, screen_rect.y + screen_rect.h,
+             screen_w, screen_h - (screen_rect.y + screen_rect.h), white_color)
+-- Left
+bb:paintRect(0, screen_rect.y,
+             screen_rect.x, screen_rect.h, white_color)
+-- Right
+bb:paintRect(screen_rect.x + screen_rect.w, screen_rect.y,
+             screen_w - (screen_rect.x + screen_rect.w), screen_rect.h, white_color)
 
-    -- Dibujamos la imagen del panel en la posición calculada.
-    -- Es importante usar "ditherblitFrom" en pantallas E-Ink para mejorar la
-    -- calidad de la imagen y reducir el "banding".
+    
+    -- KOADER MUFPDF LOGIC: Enable dithering for E-ink displays to prevent artifacts
+    -- KOReader uses dithering for 8bpp displays and grayscale content
+    -- For manga panels on E-ink, we need dithering to avoid banding artifacts
     if Screen.sw_dithering then
-        bb:ditherblitFrom(self._image_bb, self._display_rect.x, self._display_rect.y, 0, 0, self._display_rect.w, self._display_rect.h)
+        bb:ditherblitFrom(self._scaled_image_bb, screen_rect.x, screen_rect.y, 0, 0, screen_rect.w, screen_rect.h)
     else
-        bb:blitFrom(self._image_bb, self._display_rect.x, self._display_rect.y, 0, 0, self._display_rect.w, self._display_rect.h)
+        bb:blitFrom(self._scaled_image_bb, screen_rect.x, screen_rect.y, 0, 0, screen_rect.w, screen_rect.h)
     end
+    
+    -- Add white frame/border on top of the image
+    -- This creates a white outline that covers the image edges
+    local border_thickness = 50
+    local side_thickness = 50  -- Reverted back to 30px outward
+    local border_color = white_color  -- Changed to white
+    
+    -- Check if panel is square using screen rect aspect ratio
+    -- The screen rect represents what's actually displayed, so that's what matters for border logic
+    local screen_aspect_ratio = screen_rect.w / screen_rect.h
+    local is_square = (screen_aspect_ratio >= 0.1 and screen_aspect_ratio <= 1.5)
+    
+    logger.info(string.format("PanelViewer: Screen rect aspect_ratio: %.3f, is_square: %s", 
+                 screen_aspect_ratio, tostring(is_square)))
+    
+    -- Additional info about panel type
+    if screen_aspect_ratio < 0.67 then
+        logger.info("PanelViewer: This is a tall vertical panel (< 0.67)")
+    elseif screen_aspect_ratio > 1.5 then
+        logger.info("PanelViewer: This is a wide horizontal panel (> 1.5)")
+    else
+        logger.info("PanelViewer: This is a standard/square panel (0.67-1.5)")
+    end
+    
+    -- Debug border coordinates
+    logger.info(string.format("PanelViewer: Screen rect: x=%d, y=%d, w=%d, h=%d", 
+                 screen_rect.x, screen_rect.y, screen_rect.w, screen_rect.h))
+    
+    -- Top border (hidden)
+    -- bb:paintRect(screen_rect.x - border_thickness, screen_rect.y - border_thickness, 
+    --              screen_rect.w + (border_thickness * 2), border_thickness, black_color)
+    
+    -- Bottom border (hidden)
+    -- bb:paintRect(screen_rect.x - border_thickness, screen_rect.y + screen_rect.h, 
+    --              screen_rect.w + (border_thickness * 2), border_thickness, black_color)
+    
+    -- Left border (30px thick, +15px inward for square panels) - drawn on top of image
+    local left_thickness = side_thickness
+    local left_inward_extension = 0
+    
+    if is_square then
+        left_inward_extension = 4  -- Increased to 6px
+        logger.info("PanelViewer: Square panel detected, adding 6px inward extension to left border")
+    end
+    
+    local total_left_thickness = left_thickness + left_inward_extension
+    logger.info(string.format("PanelViewer: Left border: thickness=%d + extension=%d = total=%d", 
+                 left_thickness, left_inward_extension, total_left_thickness))
+    logger.info(string.format("PanelViewer: Drawing left border at x=%d, y=%d, w=%d, h=%d", 
+                 screen_rect.x - left_thickness, screen_rect.y - border_thickness, 
+                 total_left_thickness, screen_rect.h + (border_thickness * 2)))
+    
+    bb:paintRect(screen_rect.x - left_thickness, screen_rect.y - border_thickness, 
+                 total_left_thickness, screen_rect.h + (border_thickness * 2), border_color)
+    
+    -- Right border (30px thick, +15px inward for square panels) - drawn on top of image
+    local right_thickness = side_thickness
+    local right_inward_extension = 0
+    
+    if is_square then
+        right_inward_extension = 0  -- Increased to 2px
+        logger.info("PanelViewer: Square panel detected, adding 2px inward extension to right border")
+    else
+        logger.info("PanelViewer: Not a square panel, using standard right border")
+    end
+    
+    local total_right_thickness = right_thickness + right_inward_extension
+    logger.info(string.format("PanelViewer: Right border: thickness=%d + extension=%d = total=%d", 
+                 right_thickness, right_inward_extension, total_right_thickness))
+    logger.info(string.format("PanelViewer: Drawing right border at x=%d, y=%d, w=%d, h=%d", 
+                 screen_rect.x + screen_rect.w - right_inward_extension, screen_rect.y - border_thickness, 
+                 total_right_thickness, screen_rect.h + (border_thickness * 2)))
+    
+    bb:paintRect(screen_rect.x + screen_rect.w - right_inward_extension, screen_rect.y - border_thickness, 
+                 total_right_thickness, screen_rect.h + (border_thickness * 2), border_color)
+    
+    self._is_dirty = false
 end
-
-
--- ===================================================================
--- FUNCIONES DE ACTUALIZACIÓN
--- ===================================================================
-
---
--- FUNCIÓN: updateImage(new_image)
--- Permite a main.lua cambiar la imagen del panel (por ejemplo, al mostrar un panel precargado).
---
-function PanelViewer:updateImage(new_image)
-    self.image = new_image
-    self:loadImage()
-    self:calculateDisplayRect()
-end
-
---
--- FUNCIÓN: updateCustomPosition(custom_position)
--- Permite a main.lua actualizar la posición de centrado.
---
-function PanelViewer:updateCustomPosition(custom_position)
-    self.custom_position = custom_position
-    self:calculateDisplayRect()
-end
-
---
--- FUNCIÓN: update()
--- Provoca un repintado de la pantalla.
---
-function PanelViewer:update()
-    UIManager:setDirty(self, "ui")
-end
-
--- ===================================================================
--- FUNCIONES DE GESTIÓN DEL WIDGET
--- ===================================================================
 
 function PanelViewer:getScreenRect()
-    return self._display_rect or Geom:new{ x=0, y=0, w=Screen:getWidth(), h=Screen:getHeight() }
+    -- Single source of truth for screen-space coordinates
+    -- Future-proof: supports animations, transforms, partial redraws
+    if not self._display_rect then
+        -- Fallback: full screen
+        return {
+            x = 0,
+            y = 0,
+            w = Screen:getWidth(),
+            h = Screen:getHeight()
+        }
+    end
+    
+    return {
+        x = self._display_rect.x,
+        y = self._display_rect.y,
+        w = self._display_rect.w,
+        h = self._display_rect.h
+    }
 end
 
 function PanelViewer:getSize()
-    return Geom:new{ w = Screen:getWidth(), h = Screen:getHeight() }
+    return Geom:new{
+        x = 0,
+        y = 0,
+        w = Screen:getWidth(),
+        h = Screen:getHeight()
+    }
+end
+
+function PanelViewer:updateImage(new_image)
+    -- Update the image source
+    if self._image_bb and self._image_bb ~= self.image then
+        self._image_bb:free()
+    end
+    
+    self.image = new_image
+    self._image_bb = new_image
+    self:loadImage()
+    self:calculateDisplayRect()
+    self._is_dirty = true
+    
+    logger.info("PanelViewer: Image updated")
+end
+
+function PanelViewer:update()
+    -- KOADER MUFPDF LOGIC: Use proper refresh types like ImageViewer
+    -- For panel viewing, we want "ui" refresh for smooth transitions
+    -- and "flashui" for initial display to ensure crisp rendering
+    self._is_dirty = true
+    UIManager:setDirty(self, function()
+        return "ui", self.dimen, Screen.sw_dithering  -- Enable dithering for E-ink
+    end)
+    logger.info("PanelViewer: Update called with KOReader refresh logic")
+end
+
+function PanelViewer:updateReadingDirection(direction)
+    self.reading_direction = direction or "ltr"
+    logger.info(string.format("PanelViewer: Reading direction set to %s", self.reading_direction))
+end
+
+function PanelViewer:updateCustomPosition(custom_position)
+    self.custom_position = custom_position
+    -- Recalculate display rect with new position
+    self:calculateDisplayRect()
+    logger.info("PanelViewer: Custom position updated and display rect recalculated")
+end
+
+function PanelViewer:freeResources()
+    -- BEST: No separate scaled image to free (1:1 blitting)
+    -- Only free the original if it's not externally managed
+    if self._image_bb and self._image_bb ~= self.image then
+        self._image_bb:free()
+        self._image_bb = nil
+    end
+    self._scaled_image_bb = nil  -- Just clear the reference
+    logger.info("PanelViewer: Resources freed (1:1 blit mode)")
 end
 
 function PanelViewer:close()
+    self:freeResources()
     UIManager:close(self)
 end
 
