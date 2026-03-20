@@ -354,7 +354,6 @@ function PanelZoomIntegration:displayPreloadedPanel()
         custom_position.x, custom_position.y, image_w, image_h, screen_w, screen_h))
     
     self._current_imgviewer:update()
-    UIManager:setDirty(self._current_imgviewer, "ui")
     
     -- Clear preloaded data after use
     self._preloaded_image = nil
