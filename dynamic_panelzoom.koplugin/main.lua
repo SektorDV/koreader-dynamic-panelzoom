@@ -30,7 +30,6 @@ local PanelZoomIntegration = WidgetContainer:extend{
     _original_genPanelZoomMenu = nil, -- Store original panel zoom menu function
     _json_available = false, -- Track if JSON is available for current document
     reading_direction_override = nil, -- User override for reading direction (rtl/ltr)
-    horizontal_offset = 0,
 }
 
 function PanelZoomIntegration:init()
@@ -60,10 +59,11 @@ end
 
 -- Get effective reading direction (override takes precedence over JSON)
 function PanelZoomIntegration:getEffectiveReadingDirection()
+    -- No longer use a non-existent JSON property. Default is ltr unless overridden.
     if self.reading_direction_override then
         return self.reading_direction_override
     end
-    return self.reading_direction or "ltr"
+    return "ltr"
 end
 
 -- Check if document is compatible and integrate with Panel Zoom automatically
@@ -177,46 +177,88 @@ function PanelZoomIntegration:restoreOCR()
 end
 
 -- Callback methods for PanelViewer
-function PanelZoomIntegration:nextPanel()
-    if self._is_switching then return end -- Block if already processing
+-- Spatial navigation methods for PanelViewer
+function PanelZoomIntegration:handleTapRight()
+    if self._is_switching then return end
     self._is_switching = true
-    
-    -- Reset the flag after the UI has had a chance to breathe
     UIManager:scheduleIn(0.3, function() self._is_switching = false end)
     
-    -- Check if we have preloaded the next panel
-    if self._preloaded_image and self._preloaded_panel_index == self.current_panel_index + 1 then
-        -- Use preloaded image for instant switch
-        logger.info("PanelZoom: Using preloaded panel for instant switch")
-        self.current_panel_index = self.current_panel_index + 1
-        self:displayPreloadedPanel()
-        return
-    end
+    local reading_dir = self:getEffectiveReadingDirection()
+    local is_rtl = reading_dir == "rtl"
     
-    if self.current_panel_index < #self.current_panels then
-        self.current_panel_index = self.current_panel_index + 1
-        self:displayCurrentPanel()
+    -- In absolute spatial terms:
+    -- If LTR: Right tap means "go to next panel" (index + 1 in the correctly sorted array)
+    -- If RTL: Right tap means "go to previous panel" (index - 1 in the correctly sorted array)
+    if not is_rtl then
+        -- LTR Flow
+        -- Check preload first for LTR Next
+        if self._preloaded_image and self._preloaded_panel_index == self.current_panel_index + 1 then
+            logger.info("PanelZoom: Using preloaded panel for instant switch (LTR Right)")
+            self.current_panel_index = self.current_panel_index + 1
+            self:displayPreloadedPanel()
+            return
+        end
+        
+        if self.current_panel_index < #self.current_panels then
+            self.current_panel_index = self.current_panel_index + 1
+            self:displayCurrentPanel()
+        else
+            -- LTR: End of page, right tap goes to next page
+            logger.info("PanelZoom: Bottom-right reached (LTR), jumping to next page")
+            self:changePage(1)
+        end
     else
-        -- Last panel reached, jump to next page
-        logger.info("PanelZoom: Last panel reached, jumping to next page")
-        self:changePage(1) 
+        -- RTL Flow: Right tap goes backwards in reading order (index - 1)
+        if self.current_panel_index > 1 then
+            self.current_panel_index = self.current_panel_index - 1
+            self:displayCurrentPanel()
+        else
+            -- RTL: Top-right reached, right tap goes to previous page
+            logger.info("PanelZoom: Top-right reached (RTL), jumping to previous page")
+            self:changePage(-1)
+        end
     end
 end
 
-function PanelZoomIntegration:prevPanel()
-    if self._is_switching then return end -- Block if already processing
+function PanelZoomIntegration:handleTapLeft()
+    if self._is_switching then return end
     self._is_switching = true
-    
-    -- Reset the flag after the UI has had a chance to breathe
     UIManager:scheduleIn(0.3, function() self._is_switching = false end)
     
-    if self.current_panel_index > 1 then
-        self.current_panel_index = self.current_panel_index - 1
-        self:displayCurrentPanel()
+    local reading_dir = self:getEffectiveReadingDirection()
+    local is_rtl = reading_dir == "rtl"
+    
+    -- In absolute spatial terms:
+    -- If LTR: Left tap means "go to previous panel" (index - 1)
+    -- If RTL: Left tap means "go to next panel" (index + 1)
+    if not is_rtl then
+        -- LTR Flow: Left tap goes backwards
+        if self.current_panel_index > 1 then
+            self.current_panel_index = self.current_panel_index - 1
+            self:displayCurrentPanel()
+        else
+            -- LTR: Top-left reached, left tap goes to previous page
+            logger.info("PanelZoom: Top-left reached (LTR), jumping to previous page")
+            self:changePage(-1)
+        end
     else
-        -- First panel reached, jump to previous page
-        logger.info("PanelZoom: First panel reached, jumping to previous page")
-        self:changePage(-1)
+        -- RTL Flow: Left tap goes forwards (index + 1)
+        -- Check preload first for RTL Next
+        if self._preloaded_image and self._preloaded_panel_index == self.current_panel_index + 1 then
+            logger.info("PanelZoom: Using preloaded panel for instant switch (RTL Left)")
+            self.current_panel_index = self.current_panel_index + 1
+            self:displayPreloadedPanel()
+            return
+        end
+        
+        if self.current_panel_index < #self.current_panels then
+            self.current_panel_index = self.current_panel_index + 1
+            self:displayCurrentPanel()
+        else
+            -- RTL: Bottom-left reached, left tap goes to next page
+            logger.info("PanelZoom: Bottom-left reached (RTL), jumping to next page")
+            self:changePage(1)
+        end
     end
 end
 
@@ -235,9 +277,17 @@ function PanelZoomIntegration:preloadNextPanel()
     -- Clean up any existing preloaded image
     self:cleanupPreloadedImage()
     
+    local reading_dir = self:getEffectiveReadingDirection()
+    local is_rtl = reading_dir == "rtl"
+    
+    -- In absolute terms, "next" means index+1 (if LTR) or index-1 (if RTL)
+    -- Actually, wait: the index IS correctly sorted in importToggleZoomPanels based on reading direction!
+    -- Yes, the array is ALWAYS sorted so that index 1 is the START and index N is the END of the page.
+    -- So "next panel in logical reading order" is always index + 1!
+    local next_panel_index = self.current_panel_index + 1
+    
     -- Check if there's a next panel to preload
-    if self.current_panel_index < #self.current_panels then
-        local next_panel_index = self.current_panel_index + 1
+    if next_panel_index <= #self.current_panels then
         local next_panel = self.current_panels[next_panel_index]
         
         if next_panel then
@@ -357,9 +407,6 @@ function PanelZoomIntegration:drawPagePartWithSettings(pageno, rect, panel_cente
         x = math.floor(math.max(padding, math.min(pos_x, screen_w - display_w - padding)) + 0.5),
         y = math.floor(math.max(padding, math.min(pos_y, screen_h - display_h - padding)) + 0.5)
     }
-    -- 5b. APPLY HORIZONTAL OFFSET
-custom_position.x = custom_position.x + (self.horizontal_offset or -2)
--- Optional: clamp to screen bounds
 
     -- 6. ASPECT RATIO NUDGES (Original offsets)
     if panel and dim then
@@ -461,7 +508,10 @@ function PanelZoomIntegration:changePage(diff)
         self:importToggleZoomPanels()
         
         if #self.current_panels > 0 then
-            -- If going forward, start at panel 1. If going backward, start at last panel.
+            -- Note: In our spatial mapping, index 1 is always top-left(LTR) or top-right(RTL).
+            -- Index #current_panels is always bottom-right(LTR) or bottom-left(RTL).
+            -- In LTR: Next page (diff > 0) starts at 1. Prev page starts at N.
+            -- In RTL: Next page (diff > 0) starts at 1. Prev page starts at N.
             self.current_panel_index = diff > 0 and 1 or #self.current_panels
             -- Just update the current viewer instead of closing/reopening
             self:displayCurrentPanel()
@@ -546,6 +596,8 @@ function PanelZoomIntegration:onIntegratedPanelZoom(arg, ges)
     end
 
     if #self.current_panels > 0 then
+        -- Initial launch of Panel Viewer on a page
+        -- In LTR, start at index 1 (top-left). In RTL, start at index 1 (top-right).
         self.current_panel_index = 1
         return self:displayCurrentPanel()
     end
@@ -559,23 +611,28 @@ function PanelZoomIntegration:importToggleZoomPanels()
     if not doc_path then return end
     
     local page_idx = self:getSafePageNumber()
+    local reading_dir = self:getEffectiveReadingDirection()
     
-    -- Check if we already have panels for this page cached in memory
-    if self._panel_cache[doc_path] and self._panel_cache[doc_path][page_idx] then
-        logger.info(string.format("DynamicPanelZoom: Using cached panels for page %d", page_idx))
-        self.current_panels = self._panel_cache[doc_path][page_idx]
+    -- The cache key must now include reading_dir, otherwise flipping direction
+    -- uses the old cached layout where panel 1 meant LTR/top-left instead of RTL/top-right.
+    if not self._panel_cache[doc_path] then self._panel_cache[doc_path] = {} end
+    if not self._panel_cache[doc_path][reading_dir] then self._panel_cache[doc_path][reading_dir] = {} end
+    
+    -- Check if we already have panels for this page cached in memory FOR THIS READING DIR
+    if self._panel_cache[doc_path][reading_dir][page_idx] then
+        logger.info(string.format("DynamicPanelZoom: Using cached %s panels for page %d", reading_dir, page_idx))
+        self.current_panels = self._panel_cache[doc_path][reading_dir][page_idx]
         return
     end
     
-    logger.info(string.format("DynamicPanelZoom: Analyzing page %d for panels dynamically", page_idx))
+    logger.info(string.format("DynamicPanelZoom: Analyzing page %d for %s panels dynamically", page_idx, reading_dir))
     self.current_panels = self:analyzePageForPanels(page_idx)
     
-    -- Cache it for this document and page
-    if not self._panel_cache[doc_path] then self._panel_cache[doc_path] = {} end
-    self._panel_cache[doc_path][page_idx] = self.current_panels
+    -- Cache it for this document and page and direction
+    self._panel_cache[doc_path][reading_dir][page_idx] = self.current_panels
     
     if #self.current_panels > 0 then
-        logger.info(string.format("DynamicPanelZoom: SUCCESS! Detected %d panels for page %d", #self.current_panels, page_idx))
+        logger.info(string.format("DynamicPanelZoom: SUCCESS! Detected %d panels for page %d (%s)", #self.current_panels, page_idx, reading_dir))
     else
         logger.warn(string.format("DynamicPanelZoom: No panels detected on page %d", page_idx))
     end
@@ -881,8 +938,8 @@ function PanelZoomIntegration:displayCurrentPanel()
         reading_direction = self:getEffectiveReadingDirection(),
         custom_position = custom_position,  -- Pass custom position for center matching
         panel_aspect_ratio = panel_aspect_ratio,  -- Pass panel aspect ratio for border logic
-        onNext = function() self:nextPanel() end,
-        onPrev = function() self:prevPanel() end,
+        onTapRight = function() self:handleTapRight() end,
+        onTapLeft = function() self:handleTapLeft() end,
         onClose = function() 
             self:closeViewer()
             -- Restore OCR when panel viewer is closed
@@ -921,61 +978,21 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
         self.ui.highlight.genPanelZoomMenu = function()
             local menu_items = self._original_genPanelZoomMenu(self.ui.highlight)
             
-            table.insert(menu_items, 2, {  -- insert after reading direction
-    text = _("Horizontal Offset"),
-    sub_item_table = {
-        {
-            text = _("Left 1 px"),
-            callback = function()
-                self.horizontal_offset = (self.horizontal_offset or 0) - 1
-                logger.info("DynamicPanelZoom: Horizontal offset set to " .. self.horizontal_offset)
-                self:refreshCurrentPanelIfActive()
-            end
-        },
-        {
-            text = _("Right 1 px"),
-            callback = function()
-                self.horizontal_offset = (self.horizontal_offset or 0) + 1
-                logger.info("DynamicPanelZoom: Horizontal offset set to " .. self.horizontal_offset)
-                self:refreshCurrentPanelIfActive()
-            end
-        },
-        {
-            text = _("Reset"),
-            callback = function()
-                self.horizontal_offset = 0
-                logger.info("DynamicPanelZoom: Horizontal offset reset to 0")
-                self:refreshCurrentPanelIfActive()
-            end
-        }
-    },
-    separator = true,
-})
-
-            
             -- Add reading direction submenu at the beginning
             table.insert(menu_items, 1, {
                 text = _("Reading Direction"),
                 sub_item_table = {
                     {
-                        text = _("Auto (from JSON)"),
-                        checked_func = function()
-                            return self.reading_direction_override == nil
-                        end,
-                        callback = function()
-                            self.reading_direction_override = nil
-                            logger.info("DynamicPanelZoom: Reading direction set to Auto (from JSON)")
-                            self:refreshCurrentPanelIfActive()
-                        end,
-                    },
-                    {
                         text = _("Left-to-Right (LTR)"),
                         checked_func = function()
-                            return self.reading_direction_override == "ltr"
+                            return self.reading_direction_override == "ltr" or self.reading_direction_override == nil
                         end,
                         callback = function()
                             self.reading_direction_override = "ltr"
                             logger.info("DynamicPanelZoom: Reading direction override set to LTR")
+                            -- Clear all caches globally so next panel invocation re-sorts
+                            self._panel_cache = {}
+                            self.current_panels = {}
                             self:refreshCurrentPanelIfActive()
                         end,
                     },
@@ -987,6 +1004,9 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
                         callback = function()
                             self.reading_direction_override = "rtl"
                             logger.info("DynamicPanelZoom: Reading direction override set to RTL")
+                            -- Clear all caches globally so next panel invocation re-sorts
+                            self._panel_cache = {}
+                            self.current_panels = {}
                             self:refreshCurrentPanelIfActive()
                         end,
                     },
@@ -1019,6 +1039,30 @@ end
 function PanelZoomIntegration:refreshCurrentPanelIfActive()
     if self._current_imgviewer and self.integration_mode and #self.current_panels > 0 then
         logger.info("DynamicPanelZoom: Refreshing panel viewer with new reading direction")
+        
+        -- To ensure correct spatial flow, we must re-sort the panels
+        -- by the new reading direction and map the current panel to its new index
+        local old_panel = self.current_panels[self.current_panel_index]
+        
+        -- Import will automatically use the NEW reading direction and 
+        -- either generate a new layout or pull it from the direction-specific cache.
+        self:importToggleZoomPanels()
+        
+        -- Find the old panel in the newly sorted array so we stay on the same physical panel
+        if old_panel and #self.current_panels > 0 then
+            for i, p in ipairs(self.current_panels) do
+                -- Compare coordinates (allowing tiny float variations)
+                if math.abs(p.x - old_panel.x) < 0.001 and math.abs(p.y - old_panel.y) < 0.001 then
+                    self.current_panel_index = i
+                    break
+                end
+            end
+        end
+        
+        -- Propagate reading direction immediately
+        if self._current_imgviewer.updateReadingDirection then
+            self._current_imgviewer:updateReadingDirection(self:getEffectiveReadingDirection())
+        end
         self:displayCurrentPanel()
     end
 end

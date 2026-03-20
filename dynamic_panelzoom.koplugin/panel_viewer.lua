@@ -164,20 +164,13 @@ function PanelViewer:onTap(_, ges)
     local screen_w = Screen:getWidth()
     local x_pct = ges.pos.x / screen_w
     
-    -- Determine direction based on reading direction
-    local is_rtl = self.reading_direction == "rtl"
-    
-    -- Zone Logic: In RTL, Left is "Forward". In LTR, Right is "Forward".
-    local is_forward = (is_rtl and x_pct < 0.3) or (not is_rtl and x_pct > 0.7)
-    local is_backward = (is_rtl and x_pct > 0.7) or (not is_rtl and x_pct < 0.3)
-    
-    if is_forward then
-        logger.info("PanelViewer: Forward tap detected")
-        if self.onNext then self.onNext() end
+    if x_pct > 0.7 then
+        logger.info("PanelViewer: Right tap detected")
+        if self.onTapRight then self.onTapRight() end
         return true
-    elseif is_backward then
-        logger.info("PanelViewer: Backward tap detected")
-        if self.onPrev then self.onPrev() end
+    elseif x_pct < 0.3 then
+        logger.info("PanelViewer: Left tap detected")
+        if self.onTapLeft then self.onTapLeft() end
         return true
     end
     
