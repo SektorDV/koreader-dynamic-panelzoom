@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Silencia el warning de Node.js
     permissions:
       contents: write # Necesita permisos para crear releases
     steps:
@@ -17,27 +19,11 @@ jobs:
       - name: Package plugin for release
         id: package
         run: |
-          # El nombre del directorio del plugin que irá dentro del zip
-          PLUGIN_DIR="dynamic_panelzoom.koplugin"
+          ZIP_NAME="dynamic_panelzoom.koplugin.zip"
+          # Usa git archive para empaquetar directamente lo comiteado,
+          # metiéndolo todo dentro de una carpeta llamada 'dynamic_panelzoom.koplugin/'
+          git archive --format=zip --prefix=dynamic_panelzoom.koplugin/ -o $ZIP_NAME HEAD
           
-          # Creamos una estructura temporal para empaquetar
-          mkdir -p "package/${PLUGIN_DIR}"
-          
-          # Copiamos todos los archivos del repositorio a esa estructura
-          # Usamos 'git ls-files' para asegurarnos de copiar solo los archivos versionados
-          git ls-files | xargs -I {} cp --parents {} "package/"
-          
-          # Movemos el contenido al directorio final
-          mv package/dynamic_panelzoom.koplugin/* "package/${PLUGIN_DIR}/"
-          rm -rf package/dynamic_panelzoom.koplugin
-          mv package/* package/${PLUGIN_DIR}/
-
-          # Creamos el archivo zip
-          cd package
-          ZIP_NAME="${PLUGIN_DIR}.zip"
-          zip -r "../${ZIP_NAME}" "${PLUGIN_DIR}"
-          cd ..
-
           # Guardamos el nombre del zip para el siguiente paso
           echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
 
