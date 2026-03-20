@@ -21,7 +21,6 @@ local PanelViewer = require("panel_viewer") -- Custom panel viewer
 local _ = require("gettext")
 local logger = require("logger")
 local util = require("util")
-local json = require("json")
 
 -- ===================================================================
 -- MAIN CLASS: PanelZoomIntegration
