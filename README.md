@@ -20,6 +20,13 @@ It's designed to "just work" and is especially useful for reading digital comics
 -   **Adjustable Offsets:** Fine-tune the horizontal position of panels to your liking.
 -   **Full Integration:** Adds its options directly into KOReader's existing "Panel zoom" menu for a seamless experience.
 
+## Requirements
+
+-   **KOReader** (Latest stable release recommended)
+-   **PanelViewer:** This plugin utilizes the `PanelViewer` widget structure, which is included within this repository but relies on KOReader's core UI components.
+
+*Disclaimer: This plugin has currently only been tested on the Linux version of KOReader (AppImage/Native) and on the Kindle Colorsoft (2025). Performance and compatibility on other platforms (Android, Kobo, PocketBook, etc.) are not guaranteed.*
+
 ## Installation
 
 1.  [Download the latest release](https://github.com/jefe/koreader-dynamic-panelzoom/releases) (the `dynamic_panelzoom.koplugin.zip` file).
@@ -35,7 +42,7 @@ It's designed to "just work" and is especially useful for reading digital comics
 4.  The first detected panel will be displayed.
     -   Tap the **right side** of the screen to move to the next panel (for LTR comics).
     -   Tap the **left side** of the screen to move to the previous panel.
-    -   Tap the **center** of the screen to exit the panel viewer.
+    -   **Tap the center of the screen to exit the panel viewer and return to the normal page view.**
 5.  At the end of a page, it will automatically turn to the next page and continue in panel view.
 
 ### Changing Reading Direction
@@ -47,6 +54,11 @@ If you are reading manga, you will want to set the reading order to Right-to-Lef
 3.  Select **Reading Direction** > **Right-to-Left (RTL)**.
 
 The tap zones will automatically adjust. In RTL mode, the left side of the screen advances to the next panel.
+
+## Known Issues & Limitations
+
+-   **Fullscreen Requirement:** The plugin currently only works correctly if you are viewing the comic in full-screen mode (without UI bars showing). If KOReader's UI menus or status bars are visible when activating Panel Zoom, the coordinate calculations may fail or behave erratically.
+-   **RTL Option Not Working:** The Right-to-Left (RTL) reading direction option is currently present in the menu but its logic is not fully implemented or functioning correctly in this release.
 
 ## Technical Approach & Acknowledgements
 
