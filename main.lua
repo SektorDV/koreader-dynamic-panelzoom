@@ -1,10 +1,10 @@
 --[[
-Dynamic Panel Zoom - Main Logic
-Author: Community (Inspired by Kaito0's work)
-Version: 1.0.0
+Dynamic Panel Zoom - Lógica Principal
+Autor: Tu Nombre/Alias (Inspirado en el trabajo de Kaito0)
+Versión: 1.0.0
 --]]
 
--- KOReader Dependencies
+-- Dependencias de KOReader
 local Device = require("device")
 local Dispatcher = require("dispatcher")
 local Geom = require("ui/geometry")
@@ -14,112 +14,113 @@ local Screen = require("device").screen
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
--- Plugin Components
-local PanelViewer = require("panel_viewer") -- Custom panel viewer
+-- Componentes del plugin
+local PanelViewer = require("panel_viewer") -- Visor de paneles personalizado
 
--- Utilities
+-- Utilidades
 local _ = require("gettext")
 local logger = require("logger")
 local util = require("util")
+local json = require("json")
 
 -- ===================================================================
--- MAIN CLASS: PanelZoomIntegration
--- Manages KOReader integration, on-the-fly panel detection,
--- and the viewer's lifecycle.
+-- CLASE PRINCIPAL: PanelZoomIntegration
+-- Gestiona la integración con KOReader, la detección de paneles
+-- y el ciclo de vida del visor.
 -- ===================================================================
 local PanelZoomIntegration = WidgetContainer:extend{
     name = "dynamic_panelzoom",
     
-    -- --- PLUGIN STATE ---
-    integration_mode = false,       -- Is the dynamic panel mode currently active?
-    current_panels = {},            -- Table holding the bounding boxes of detected panels for the current page
-    current_panel_index = 1,        -- Index of the currently displayed panel
-    last_page_seen = -1,            -- Tracks the last processed page to avoid redundant analysis
-    _panel_cache = {},              -- In-memory cache of detected panels per document/page
+    -- --- ESTADO DEL PLUGIN ---
+    integration_mode = false,       -- ¿Está el modo de panel dinámico activo?
+    current_panels = {},            -- Tabla con las coordenadas de los paneles detectados para la página actual
+    current_panel_index = 1,        -- Índice del panel que se está mostrando
+    last_page_seen = -1,            -- Última página procesada para evitar re-análisis innecesarios
+    _panel_cache = {},              -- Caché en memoria de los paneles detectados por documento/página
 
-    -- --- NAVIGATION & PRELOADING ---
-    tap_navigation_enabled = true,  -- Enable tap-to-navigate
-    tap_zones = { left = 0.3, right = 0.7 }, -- Screen tap zones for previous/next
-    _preloaded_image = nil,         -- Image buffer for the next panel (preloaded in background)
-    _preloaded_panel_index = nil,   -- Index of the preloaded panel
-    _is_switching = false,          -- Debounce flag to prevent issues with rapid tapping
+    -- --- NAVEGACIÓN Y PRECARGA ---
+    tap_navigation_enabled = true,  -- Habilitar navegación por toques (taps)
+    tap_zones = { left = 0.3, right = 0.7 }, -- Zonas de toque para siguiente/anterior
+    _preloaded_image = nil,         -- Buffer de imagen para el siguiente panel (precargado)
+    _preloaded_panel_index = nil,   -- Índice del panel precargado
+    _is_switching = false,          -- Flag para evitar múltiples cambios de panel por toques rápidos (debounce)
 
-    -- --- KOREADER INTEGRATION ---
-    -- We store original KOReader handlers so we can restore them when the plugin is disabled/closed
+    -- --- INTEGRACIÓN CON KOREADER ---
+    -- Guardamos las funciones originales para poder restaurarlas al salir
     _original_panel_zoom_handler = nil,
     _original_ocr_handler = nil,
     _original_ocr_menu_enabled = nil,
     _original_genPanelZoomMenu = nil,
     
-    -- --- USER SETTINGS ---
-    reading_direction_override = nil, -- "ltr" (Left-to-Right) or "rtl" (Right-to-Left)
-    horizontal_offset = 0,          -- Manual horizontal offset adjustment for panels
+    -- --- CONFIGURACIÓN DE USUARIO ---
+    reading_direction_override = nil, -- "ltr" (izquierda-a-derecha) o "rtl" (derecha-a-izquierda)
+    horizontal_offset = 0,          -- Desplazamiento horizontal manual para los paneles
 }
 
 --
--- FUNCTION: init()
--- Called when the plugin is loaded. Sets up event handlers.
+-- FUNCIÓN: init()
+-- Se ejecuta al cargar el plugin. Configura los manejadores de eventos.
 --
 function PanelZoomIntegration:init()
-    -- Attempt integration when a new document is opened
+    -- Cuando se carga un nuevo documento, intentamos activar la integración
     self.onDocumentLoaded = function()
         self:checkAndIntegratePanelZoom()
     end
     
-    -- Check integration status on page turns
+    -- Cuando se cambia de página, también lo comprobamos
     self.onPageUpdate = function()
         self:checkAndIntegratePanelZoom()
     end
     
-    -- Re-render the current panel if the user changes global settings (like contrast)
+    -- Si el usuario cambia ajustes (como el contraste), refrescamos el panel actual
     self.onSettingsUpdate = function()
         if self._current_imgviewer and self.integration_mode then
-            logger.info("PanelZoom: Settings changed, refreshing current panel")
+            logger.info("PanelZoom: Ajustes cambiados, refrescando panel actual")
             self:displayCurrentPanel()
         end
     end
     
-    -- Inject our custom options into KOReader's native "Panel Zoom" menu
+    -- Añadimos nuestras opciones al menú de "Panel Zoom" de KOReader
     self:setupPanelZoomMenuIntegration()
 end
 
 --
--- FUNCTION: getEffectiveReadingDirection()
--- Returns the reading direction to use (user override takes precedence).
+-- FUNCIÓN: getEffectiveReadingDirection()
+-- Devuelve la dirección de lectura a usar (la del usuario tiene prioridad).
 --
 function PanelZoomIntegration:getEffectiveReadingDirection()
     if self.reading_direction_override then
         return self.reading_direction_override
     end
-    return "ltr" -- Default to Left-to-Right
+    return "ltr" -- Por defecto, izquierda a derecha
 end
 
 --
--- FUNCTION: checkAndIntegratePanelZoom()
--- Activates the integration with KOReader's native Panel Zoom system.
+-- FUNCIÓN: checkAndIntegratePanelZoom()
+-- Activa la integración con el sistema de "Panel Zoom" de KOReader.
 --
 function PanelZoomIntegration:checkAndIntegratePanelZoom()
     if not self.ui.document then return end
     
-    -- Unlike other plugins, ours is always "available" because it analyzes 
-    -- the page on the fly and doesn't rely on external metadata files.
+    -- A diferencia de otros plugins, el nuestro siempre está "disponible"
+    -- porque no depende de archivos externos.
     self:integrateWithPanelZoom()
-    logger.info("DynamicPanelZoom: Automatic integration enabled.")
+    logger.info("DynamicPanelZoom: Integración automática habilitada.")
 end
 
 --
--- FUNCTION: integrateWithPanelZoom()
--- Overrides KOReader's Panel Zoom and OCR handlers with our own logic.
+-- FUNCIÓN: integrateWithPanelZoom()
+-- Sobrescribe las funciones de Panel Zoom y OCR de KOReader con las nuestras.
 --
 function PanelZoomIntegration:integrateWithPanelZoom()
     if not self.ui.highlight then return end
     
-    -- Store the original Panel Zoom handler if we haven't already
+    -- Guardamos el manejador original de "Panel Zoom" si no lo hemos hecho ya
     if not self._original_panel_zoom_handler then
         self._original_panel_zoom_handler = self.ui.highlight.onPanelZoom
     end
     
-    -- Override the handler to redirect to our dynamic analysis logic
+    -- Sobrescribimos el manejador para que llame a nuestra lógica
     self.ui.highlight.onPanelZoom = function(inst, arg, ges)
         return self:onIntegratedPanelZoom(arg, ges)
     end
@@ -127,32 +128,32 @@ function PanelZoomIntegration:integrateWithPanelZoom()
     self.integration_mode = true
     if self.ui.highlight then self.ui.highlight.panel_zoom_enabled = true end
     
-    -- Block OCR functionality, as it conflicts with our custom panel viewer
+    -- Bloqueamos el OCR, ya que es incompatible con nuestro visor de paneles
     self:blockOCR()
 end
 
 --
--- FUNCTION: restoreOriginalPanelZoom()
--- Restores KOReader's original handlers, effectively disabling our plugin's interception.
+-- FUNCIÓN: restoreOriginalPanelZoom()
+-- Restaura los manejadores originales de KOReader, desactivando nuestro plugin.
 --
 function PanelZoomIntegration:restoreOriginalPanelZoom()
     if not self.ui.highlight then return end
     
-    -- Restore the original Panel Zoom handler
+    -- Restaura el manejador de "Panel Zoom"
     if self._original_panel_zoom_handler then
         self.ui.highlight.onPanelZoom = self._original_panel_zoom_handler
     end
     
     self.integration_mode = false
     
-    -- Restore OCR and Menu functionality
+    -- Restaura el OCR y el menú
     self:restoreOCR()
     self:restorePanelZoomMenu()
 end
 
 --
--- FUNCTION: blockOCR() / restoreOCR()
--- Helper functions to temporarily disable and then re-enable KOReader's OCR system.
+-- FUNCIÓN: blockOCR() / restoreOCR()
+-- Funciones para desactivar y reactivar el sistema de OCR de KOReader.
 --
 function PanelZoomIntegration:blockOCR()
     if not self._original_ocr_handler and self.ui.ocr then
@@ -161,7 +162,7 @@ function PanelZoomIntegration:blockOCR()
     
     if self.ui.ocr then
         self.ui.ocr.onOCRText = function()
-            logger.info("DynamicPanelZoom: OCR blocked because panel viewer is active.")
+            logger.info("DynamicPanelZoom: OCR bloqueado porque el visor de paneles está activo.")
             return false
         end
     end
@@ -176,36 +177,36 @@ end
 
 
 -- ===================================================================
--- PANEL NAVIGATION
+-- NAVEGACIÓN ENTRE PANELES
 -- ===================================================================
 
 --
--- FUNCTION: nextPanel() / prevPanel()
--- Executed when the user taps the designated zones on the screen.
+-- FUNCIÓN: nextPanel() / prevPanel()
+-- Se ejecutan al tocar la parte derecha o izquierda de la pantalla.
 --
 function PanelZoomIntegration:nextPanel()
-    if self._is_switching then return end -- Debounce to prevent multiple rapid triggers
+    if self._is_switching then return end -- Evitar toques múltiples
     self._is_switching = true
     UIManager:scheduleIn(0.3, function() self._is_switching = false end)
     
-    -- If the next panel is already preloaded, display it instantly
+    -- Si tenemos el siguiente panel precargado, lo mostramos al instante
     if self._preloaded_image and self._preloaded_panel_index == self.current_panel_index + 1 then
         self.current_panel_index = self.current_panel_index + 1
         self:displayPreloadedPanel()
         return
     end
     
-    -- Otherwise, proceed to the next panel or the next page
+    -- Si no, avanzamos al siguiente panel o a la siguiente página
     if self.current_panel_index < #self.current_panels then
         self.current_panel_index = self.current_panel_index + 1
         self:displayCurrentPanel()
     else
-        self:changePage(1) -- Last panel reached, turn to the next page
+        self:changePage(1) -- Último panel, cambiamos de página
     end
 end
 
 function PanelZoomIntegration:prevPanel()
-    if self._is_switching then return end -- Debounce
+    if self._is_switching then return end -- Evitar toques múltiples
     self._is_switching = true
     UIManager:scheduleIn(0.3, function() self._is_switching = false end)
     
@@ -213,33 +214,33 @@ function PanelZoomIntegration:prevPanel()
         self.current_panel_index = self.current_panel_index - 1
         self:displayCurrentPanel()
     else
-        self:changePage(-1) -- First panel reached, turn to the previous page
+        self:changePage(-1) -- Primer panel, volvemos a la página anterior
     end
 end
 
 --
--- FUNCTION: closeViewer()
--- Closes the custom panel viewer and frees up resources.
+-- FUNCIÓN: closeViewer()
+-- Cierra el visor de paneles y libera recursos.
 --
 function PanelZoomIntegration:closeViewer()
     if self._current_imgviewer then
         UIManager:close(self._current_imgviewer)
         self._current_imgviewer = nil
         self:cleanupPreloadedImage()
-        self:restoreOCR() -- Re-enable OCR upon exiting
+        self:restoreOCR() -- Restauramos el OCR al salir
     end
 end
 
 -- ===================================================================
--- PANEL RENDERING & PRELOADING
+-- RENDERIZADO Y PRECARGA DE PANELES
 -- ===================================================================
 
 --
--- FUNCTION: preloadNextPanel()
--- Renders the next panel in the background to ensure smooth, instant transitions.
+-- FUNCIÓN: preloadNextPanel()
+-- Renderiza el siguiente panel en segundo plano para una transición fluida.
 --
 function PanelZoomIntegration:preloadNextPanel()
-    self:cleanupPreloadedImage() -- Clear any previously preloaded data
+    self:cleanupPreloadedImage() -- Limpia la imagen precargada anterior
     
     if self.current_panel_index < #self.current_panels then
         local next_panel_index = self.current_panel_index + 1
@@ -251,7 +252,7 @@ function PanelZoomIntegration:preloadNextPanel()
             
             if dim then
                 local rect = self:panelToRect(next_panel, dim)
-                -- Render the specific portion of the page representing the panel
+                -- Renderiza la porción de la página correspondiente al panel
                 local image, _, custom_position = self:drawPagePartWithSettings(page, rect, nil, next_panel, dim)
                 
                 if image then
@@ -265,31 +266,31 @@ function PanelZoomIntegration:preloadNextPanel()
 end
 
 --
--- FUNCTION: displayPreloadedPanel()
--- Instantly displays the panel that was rendered in the background.
+-- FUNCIÓN: displayPreloadedPanel()
+-- Muestra el panel que ya ha sido renderizado en segundo plano.
 --
 function PanelZoomIntegration:displayPreloadedPanel()
     if not self._preloaded_image or not self._current_imgviewer then return false end
     
-    -- Update the existing viewer with the preloaded image and position
+    -- Actualiza la imagen y la posición en el visor actual
     self._current_imgviewer:updateImage(self._preloaded_image)
     self._current_imgviewer:updateCustomPosition(self._preloaded_custom_position)
     self._current_imgviewer:update()
     
-    -- Clear preload data after use
+    -- Limpiamos los datos de precarga una vez usados
     self._preloaded_image = nil
     self._preloaded_panel_index = nil
     self._preloaded_custom_position = nil
     
-    -- Immediately schedule the preloading of the *next* panel
+    -- Programamos la precarga del siguiente panel
     UIManager:scheduleIn(0.1, function() self:preloadNextPanel() end)
     return true
 end
 
 --
--- FUNCTION: drawPagePartWithSettings()
--- Core rendering function. Extracts a section of the page (the panel) and applies
--- the user's current display settings (zoom, contrast, gamma, invert).
+-- FUNCIÓN: drawPagePartWithSettings()
+-- Función clave. Renderiza una sección de la página (un panel) aplicando
+-- los ajustes de zoom, contraste, gamma, etc. del usuario.
 --
 function PanelZoomIntegration:drawPagePartWithSettings(pageno, rect, panel_center, panel, dim)
     local doc_cfg = self.ui.document.info.config or {}
@@ -298,32 +299,32 @@ function PanelZoomIntegration:drawPagePartWithSettings(pageno, rect, panel_cente
     
     local screen_w, screen_h = Screen:getWidth(), Screen:getHeight()
 
-    -- Define a "safe zone" to ensure panels don't touch the absolute screen edge
+    -- Calculamos un "área segura" con un pequeño margen
     local padding = 5
     local safe_w, safe_h = screen_w - (padding * 2), screen_h - (padding * 2)
 
-    -- Calculate the required scale to fit the panel inside the safe zone
+    -- Calculamos la escala necesaria para que el panel quepa en el área segura
     local final_scale = math.min(safe_w / rect.w, safe_h / rect.h)
     local display_w, display_h = math.floor(rect.w * final_scale + 0.5), math.floor(rect.h * final_scale + 0.5)
 
-    -- Calculate coordinates to center the panel on the screen
+    -- Centramos el panel en la pantalla
     local pos_x, pos_y = (screen_w - display_w) / 2, (screen_h - display_h) / 2
     
-    -- Calculate final position, clamping it to the safe zone boundaries
+    -- Calculamos la posición final, asegurando que no se salga de los márgenes
     local custom_position = {
         x = math.floor(math.max(padding, math.min(pos_x, screen_w - display_w - padding)) + 0.5),
         y = math.floor(math.max(padding, math.min(pos_y, screen_h - display_h - padding)) + 0.5)
     }
     
-    -- Apply the manual horizontal offset (if any)
+    -- Aplicamos el desplazamiento horizontal manual
     custom_position.x = custom_position.x + self.horizontal_offset
     
-    -- Request the specific page rectangle from KOReader's rendering engine (MuPDF)
+    -- Renderizamos el fragmento de la página usando la API de KOReader
     local geom_rect = Geom:new(rect)
     local tile = self.ui.document:renderPage(pageno, geom_rect, final_scale, 0, gamma, true)
     local image = tile.bb
 
-    -- Apply image post-processing based on document settings
+    -- Aplicamos post-procesado (contraste, inversión de color)
     if image then
         if contrast ~= 1.0 and image.contrast then image:contrast(contrast) end
         if doc_cfg.invert and image.invert then image:invert() end
@@ -334,35 +335,35 @@ end
 
 
 -- ===================================================================
--- DYNAMIC PANEL DETECTION ENGINE
+-- DETECCIÓN DINÁMICA DE PANELES
 -- ===================================================================
 
 --
--- FUNCTION: onIntegratedPanelZoom()
--- Main entry point triggered when the user activates "Panel Zoom" in KOReader.
+-- FUNCIÓN: onIntegratedPanelZoom()
+-- Punto de entrada principal cuando el usuario activa "Panel Zoom".
 --
 function PanelZoomIntegration:onIntegratedPanelZoom(arg, ges)
     local current_page = self:getSafePageNumber()
     
-    -- If we moved to a new page or have no panel data, analyze the page
+    -- Si hemos cambiado de página o no tenemos paneles, los analizamos
     if current_page ~= self.last_page_seen or #self.current_panels == 0 then
         self.last_page_seen = current_page
         self:importAndAnalyzePanels()
     end
 
-    -- If panels were found, start by displaying the first one
+    -- Si se encontraron paneles, mostramos el primero
     if #self.current_panels > 0 then
         self.current_panel_index = 1
         return self:displayCurrentPanel()
     end
 
-    logger.warn("DynamicPanelZoom: No panels detected on this page.")
+    logger.warn("DynamicPanelZoom: No se encontraron paneles en esta página.")
     return false
 end
 
 --
--- FUNCTION: importAndAnalyzePanels()
--- Checks the in-memory cache first; if empty, triggers the Leptonica analysis.
+-- FUNCIÓN: importAndAnalyzePanels()
+-- Comprueba la caché y, si es necesario, llama a la función de análisis.
 --
 function PanelZoomIntegration:importAndAnalyzePanels()
     local doc_path = self.ui.document.file
@@ -370,29 +371,29 @@ function PanelZoomIntegration:importAndAnalyzePanels()
     
     local page_idx = self:getSafePageNumber()
     
-    -- Check cache first to save CPU cycles
+    -- Comprobamos primero si ya tenemos los paneles para esta página en caché
     if self._panel_cache[doc_path] and self._panel_cache[doc_path][page_idx] then
         self.current_panels = self._panel_cache[doc_path][page_idx]
         return
     end
     
-    -- Perform real-time image analysis to detect panels
-    logger.info("DynamicPanelZoom: Dynamically analyzing page " .. page_idx .. " for panels.")
+    -- Si no, analizamos la página para encontrar los paneles
+    logger.info("DynamicPanelZoom: Analizando página " .. page_idx .. " para detectar paneles dinámicamente.")
     self.current_panels = self:analyzePageForPanels(page_idx)
     
-    -- Store results in cache for this session
+    -- Guardamos los resultados en la caché
     if not self._panel_cache[doc_path] then self._panel_cache[doc_path] = {} end
     self._panel_cache[doc_path][page_idx] = self.current_panels
 end
 
 --
--- FUNCTION: analyzePageForPanels()
--- The core engine. Uses the Leptonica C library via FFI to process the page
--- image, binarize it, and find the bounding boxes of distinct content (panels).
+-- FUNCIÓN: analyzePageForPanels()
+-- El corazón del plugin. Usa Leptonica a través de FFI para analizar la imagen
+-- de la página y detectar los rectángulos que corresponden a los paneles.
 --
 function PanelZoomIntegration:analyzePageForPanels(pageno)
     local ffi = require("ffi")
-    local leptonica = ffi.loadlib("leptonica", "6") -- Load Leptonica library
+    local leptonica = ffi.loadlib("leptonica", "6") -- Cargamos la librería Leptonica
     
     if not self.ui.document or not self.ui.document._document then return {} end
     
@@ -400,7 +401,7 @@ function PanelZoomIntegration:analyzePageForPanels(pageno)
     local page_size = self.ui.document:getNativePageDimensions(pageno)
     if not page_size then return {} end
     
-    -- Retrieve a grayscale image of the entire page
+    -- Obtenemos la imagen de la página completa en escala de grises
     local bbox = { x0 = 0, y0 = 0, x1 = page_size.w, y1 = page_size.h }
     local kc = KOPTContext.new()
     kc:setZoom(1.0)
@@ -413,29 +414,29 @@ function PanelZoomIntegration:analyzePageForPanels(pageno)
     local panels = {}
     
     if kc.src.data then
-        -- --- LEPTONICA IMAGE PROCESSING PIPELINE ---
-        -- 1. Convert KOReader bitmap to a Leptonica PIX object.
-        -- 2. Ensure grayscale and binarize the image (black and white).
-        -- 3. Find connected components (blobs of pixels) and their bounding boxes.
-        -- 4. Filter out boxes that are too small to be actual panels.
-        -- 5. Normalize the coordinates to a 0.0 - 1.0 scale.
+        -- --- PROCESO DE ANÁLISIS DE IMAGEN CON LEPTONICA ---
+        -- 1. Convertir el bitmap de KOReader a un objeto PIX de Leptonica.
+        -- 2. Convertir a escala de grises y binarizar (blanco y negro).
+        -- 3. Encontrar componentes conectados (manchas de píxeles) y sus "cajas" (bounding boxes).
+        -- 4. Filtrar las cajas para quedarnos solo con las que son suficientemente grandes para ser paneles.
+        -- 5. Convertir las coordenadas de las cajas a un formato relativo (de 0 a 1).
         
         local KOPTContextClass = require("ffi/koptcontext")
         local k2pdfopt = KOPTContextClass.k2pdfopt
 
-        -- FFI Memory management helpers (crucial to avoid leaks)
+        -- Funciones de ayuda para gestionar la memoria de FFI
         local function _gc_ptr(p, destructor) return p and ffi.gc(p, destructor) end
         local function pixDestroy(pix) leptonica.pixDestroy(ffi.new('PIX *[1]', pix)); ffi.gc(pix, nil) end
         local function boxaDestroy(boxa) leptonica.boxaDestroy(ffi.new('BOXA *[1]', boxa)); ffi.gc(boxa, nil) end
 
-        -- Execution steps
+        -- Pasos del procesamiento
         local pixs = _gc_ptr(k2pdfopt.bitmap2pix(kc.src, 0, 0, kc.src.width, kc.src.height), pixDestroy)
         local pixg = _gc_ptr(leptonica.pixGetDepth(pixs) == 32 and leptonica.pixConvertRGBToGrayFast(pixs) or leptonica.pixClone(pixs), pixDestroy)
         local pix_inverted = _gc_ptr(leptonica.pixInvert(nil, pixg), pixDestroy)
         local pix_thresholded = _gc_ptr(leptonica.pixThresholdToBinary(pix_inverted, 50), pixDestroy)
         leptonica.pixInvert(pix_thresholded, pix_thresholded)
         
-        -- The Magic: Find bounding boxes of connected components
+        -- Aquí está la magia: encontrar los rectángulos de los componentes conectados
         local bb = _gc_ptr(leptonica.pixConnCompBB(pix_thresholded, 8), boxaDestroy)
         
         local img_w, img_h = leptonica.pixGetWidth(pixs), leptonica.pixGetHeight(pixs)
@@ -448,7 +449,7 @@ function PanelZoomIntegration:analyzePageForPanels(pageno)
             leptonica.boxGetGeometry(box, geo, geo + 1, geo + 2, geo + 3)
             local box_x, box_y, box_w, box_h = tonumber(geo[0]), tonumber(geo[1]), tonumber(geo[2]), tonumber(geo[3])
 
-            -- Filter: Discard bounding boxes that cover less than 1/8th of the page width/height
+            -- Filtro: nos quedamos solo con los rectángulos que son suficientemente grandes
             if box_w >= img_w / 8 and box_h >= img_h / 8 then
                 table.insert(panels, {
                     x = box_x / page_size.w,
@@ -464,17 +465,16 @@ function PanelZoomIntegration:analyzePageForPanels(pageno)
     page:close()
     if kc.free then kc:free() end
     
-    -- Sort the detected panels based on reading direction (crucial for Manga)
+    -- Ordenamos los paneles según el sentido de lectura (importante para manga)
     local effective_dir = self:getEffectiveReadingDirection()
     table.sort(panels, function(a, b)
-        -- Primary sort: Top to Bottom. Secondary sort: Left/Right based on reading direction.
+        -- Ordenamos de arriba a abajo, y luego por dirección (izquierda/derecha)
         local a_center_y, b_center_y = a.y + (a.h / 2), b.y + (b.h / 2)
         
-        -- If panels are roughly on the same horizontal row (within 10% tolerance)
-        if math.abs(a_center_y - b_center_y) < 0.1 then 
+        if math.abs(a_center_y - b_center_y) < 0.1 then -- Si están en la misma "fila"
             return (effective_dir == "rtl") and (a.x > b.x) or (a.x < b.x)
         end
-        return a_center_y < b_center_y -- Otherwise, higher panel goes first
+        return a_center_y < b_center_y -- Si no, el de más arriba va primero
     end)
     
     return panels
@@ -482,19 +482,19 @@ end
 
 
 -- ===================================================================
--- UTILITIES & CALCULATIONS
+-- FUNCIONES DE UTILIDAD Y CÁLCULO
 -- ===================================================================
 
 --
--- FUNCTION: panelToRect()
--- Converts normalized panel coordinates (0.0-1.0) into absolute pixel coordinates,
--- adding a small padding to provide visual context around the panel.
+-- FUNCIÓN: panelToRect()
+-- Convierte las coordenadas relativas de un panel en un rectángulo de píxeles
+-- absolutos, añadiendo un pequeño "relleno" para dar contexto visual.
 --
 function PanelZoomIntegration:panelToRect(panel, dim)
     local px, py = panel.x * dim.w, panel.y * dim.h
     local pw, ph = panel.w * dim.w, panel.h * dim.h
     
-    -- Add a slight margin so the panel doesn't feel uncomfortably cropped
+    -- Añadimos un pequeño margen alrededor del panel para que no se sienta tan "recortado"
     local extension = 2
     local render_rect = {
         x = px - extension,
@@ -503,7 +503,7 @@ function PanelZoomIntegration:panelToRect(panel, dim)
         h = ph + (extension * 2),
     }
     
-    -- Ensure the padded rectangle strictly remains within the page boundaries
+    -- Nos aseguramos de que el rectángulo no se salga de los límites de la página
     render_rect.w = math.min(render_rect.w, dim.w)
     render_rect.h = math.min(render_rect.h, dim.h)
     render_rect.x = math.max(0, math.min(render_rect.x, dim.w - render_rect.w))
@@ -513,8 +513,8 @@ function PanelZoomIntegration:panelToRect(panel, dim)
 end
 
 --
--- FUNCTION: displayCurrentPanel()
--- Orchestrates the rendering and display of the currently targeted panel.
+-- FUNCIÓN: displayCurrentPanel()
+-- Orquesta el proceso de mostrar el panel actual en pantalla.
 --
 function PanelZoomIntegration:displayCurrentPanel()
     local panel = self.current_panels[self.current_panel_index]
@@ -524,18 +524,18 @@ function PanelZoomIntegration:displayCurrentPanel()
     local dim = self.ui.document:getNativePageDimensions(page)
     if not dim then return false end
 
-    -- Generate the cropped image for the panel
+    -- Obtenemos el rectángulo del panel y lo renderizamos
     local rect = self:panelToRect(panel, dim)
     local image, _, custom_position = self:drawPagePartWithSettings(page, rect, nil, panel, dim)
     if not image then return false end
 
-    -- Destroy the previous viewer instance to avoid memory leaks
+    -- Cerramos el visor anterior si existe
     if self._current_imgviewer then
         UIManager:close(self._current_imgviewer)
         self._current_imgviewer = nil
     end
     
-    -- Instantiate and display our custom PanelViewer
+    -- Creamos y mostramos una nueva instancia de nuestro visor personalizado
     local panel_viewer = PanelViewer:new{
         image = image,
         fullscreen = true,
@@ -549,19 +549,19 @@ function PanelZoomIntegration:displayCurrentPanel()
     self._current_imgviewer = panel_viewer
     UIManager:show(panel_viewer)
     
-    -- Force a full screen refresh (vital for E-Ink displays to clear ghosting)
+    -- Forzamos un refresco de pantalla completo para E-Ink
     UIManager:setDirty(panel_viewer, "full")
     
-    -- Initiate background preloading for the next panel
+    -- Precargamos el siguiente panel
     UIManager:scheduleIn(0.2, function() self:preloadNextPanel() end)
     
     return true
 end
 
 --
--- FUNCTION: setupPanelZoomMenuIntegration()
--- Injects custom settings ("Reading Direction" and "Horizontal Offset") 
--- directly into KOReader's native Panel Zoom configuration menu.
+-- FUNCIÓN: setupPanelZoomMenuIntegration()
+-- Añade las opciones de "Dirección de Lectura" y "Desplazamiento Horizontal"
+-- al menú de configuración del zoom de paneles de KOReader.
 --
 function PanelZoomIntegration:setupPanelZoomMenuIntegration()
     if not self._original_genPanelZoomMenu and self.ui.highlight and self.ui.highlight.genPanelZoomMenu then
@@ -570,7 +570,7 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
         self.ui.highlight.genPanelZoomMenu = function()
             local menu_items = self._original_genPanelZoomMenu(self.ui.highlight)
             
-            -- Inject Horizontal Offset submenu
+            -- Submenú para el desplazamiento horizontal
             table.insert(menu_items, 2, {
                 text = _("Horizontal Offset"),
                 sub_item_table = {
@@ -581,7 +581,7 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
                 separator = true,
             })
             
-            -- Inject Reading Direction submenu
+            -- Submenú para la dirección de lectura
             table.insert(menu_items, 1, {
                 text = _("Reading Direction"),
                 sub_item_table = {
@@ -597,21 +597,21 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
 end
 
 --
--- FUNCTION: refreshCurrentPanelIfActive()
--- Forces a re-render of the active panel. Triggered when user changes a setting.
+-- FUNCIÓN: refreshCurrentPanelIfActive()
+-- Refresca la vista del panel actual si está activa. Útil cuando se cambia una opción.
 --
 function PanelZoomIntegration:refreshCurrentPanelIfActive()
     if self._current_imgviewer and self.integration_mode and #self.current_panels > 0 then
-        -- Re-analyze and re-sort panels based on the new reading direction
+        -- Re-analiza y re-ordena los paneles con la nueva dirección
         self:importAndAnalyzePanels()
-        -- Re-display (the current index might point to a different panel now due to sorting)
+        -- Muestra el panel actual, que podría ser diferente si el orden cambió
         self:displayCurrentPanel()
     end
 end
 
 
 -- ===================================================================
--- HELPERS & FALLBACKS
+-- HELPERS Y OTRAS FUNCIONES
 -- ===================================================================
 
 function PanelZoomIntegration:cleanupPreloadedImage()
@@ -623,14 +623,12 @@ function PanelZoomIntegration:restorePanelZoomMenu()
 end
 
 function PanelZoomIntegration:changePage(diff)
-    -- Attempt to use KOReader's native paging, fallback to sending keyboard events
     if self.ui.paging and self.ui.paging.onGotoViewRel then
         self.ui.paging:onGotoViewRel(diff)
     else
         UIManager:sendEvent({ key = diff > 0 and "Right" or "Left", modifiers = {} })
     end
         
-    -- Wait briefly for the engine to render the new page before analyzing
     UIManager:scheduleIn(0.3, function()
         local new_page = self:getSafePageNumber()
         self.last_page_seen = new_page
@@ -641,14 +639,13 @@ function PanelZoomIntegration:changePage(diff)
             self.current_panel_index = diff > 0 and 1 or #self.current_panels
             self:displayCurrentPanel()
         else
-            -- If no panels found on the new page, close the viewer and notify the user
             if self._current_imgviewer then UIManager:close(self._current_imgviewer); self._current_imgviewer = nil end
             UIManager:show(InfoMessage:new{ text = _("No panels on this page"), timeout = 1 })
         end
     end)
 end
 
--- Robust helper to retrieve the current page number across different KOReader versions/states
+-- Función robusta para obtener el número de página actual
 function PanelZoomIntegration:getSafePageNumber()
     if self.ui.paging and self.ui.paging.getPage then return self.ui.paging:getPage() end
     if self.ui.paging and self.ui.paging.cur_page then return self.ui.paging.cur_page end
