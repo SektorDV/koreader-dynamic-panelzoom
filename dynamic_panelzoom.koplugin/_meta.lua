@@ -1,8 +1,7 @@
-local _ = require("gettext")
 return {
-    name = "dynamic_panelzoom",
-    fullname = _("Dynamic Panel Zoom"),
-    description = _([[Enhanced comic reading with dynamic, real-time panel detection and navigation (No JSON required)]]),
+    name = "dynamic_panelzoom.koplugin",
+    fullname = "Dynamic Panel Zoom",
+    description = "Enhanced comic reading with dynamic, real-time panel detection and navigation",
     author = "KOReader Community",
     version = "1.0.0",
 }
