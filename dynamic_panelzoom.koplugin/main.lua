@@ -492,12 +492,10 @@ function PanelZoomIntegration:cleanupPreloadedImage()
 end
 
 function PanelZoomIntegration:changePage(diff)
-    -- Close the current panel viewer immediately so it doesn't linger 
-    -- and flash over the new page during the transition.
-    if self._current_imgviewer then
-        UIManager:close(self._current_imgviewer)
-        self._current_imgviewer = nil
-    end
+    -- DO NOT close the current panel viewer immediately. 
+    -- Leaving it open keeps the screen covered with the last panel 
+    -- while KOReader renders the new full page in the background, 
+    -- preventing the "flash of full page" spoiler.
 
     -- Clear preloaded cache immediately to prevent ghost images
     self:cleanupPreloadedImage()
@@ -954,7 +952,9 @@ function PanelZoomIntegration:switchToZoomMode()
     local fit_to_screen_scale = math.min(screen_w / image_w, usable_h / image_h)
     
     -- The software scale factor to pass to ImageViewer to achieve our target absolute scale
-    local base_visual_scale = target_absolute_scale / fit_to_screen_scale
+    -- Fix: ImageViewer uses explicit scale_factor as absolute scale on the image's native resolution, 
+    -- not as a multiplier over fit_to_screen. Therefore, we pass target_absolute_scale directly.
+    local base_visual_scale = target_absolute_scale
     
     -- Apply the user's zoom preference on top of that base scale
     local bump_factor = self.zoom_initial_scale or 1.2
@@ -962,7 +962,7 @@ function PanelZoomIntegration:switchToZoomMode()
     
     logger.info(string.format("DynamicPanelZoom: ImageViewer usable height approx %d (screen %d)", usable_h, screen_h))
     logger.info(string.format("DynamicPanelZoom: ImageViewer Fit-to-screen scale is %.4f", fit_to_screen_scale))
-    logger.info(string.format("DynamicPanelZoom: Required Absolute scale is %.4f -> ImageViewer factor: %.4f", target_absolute_scale, base_visual_scale))
+    logger.info(string.format("DynamicPanelZoom: Required Absolute scale is %.4f", target_absolute_scale))
     logger.info(string.format("DynamicPanelZoom: Setting ImageViewer software scale factor to %.4f (bump: %.1fx)", initial_scale_factor, bump_factor))
 
     local image_viewer = ImageViewer:new{
@@ -1029,11 +1029,20 @@ function PanelZoomIntegration:displayCurrentPanel()
         logger.info(string.format("DynamicPanelZoom: Panel aspect ratio: %.3f", panel_aspect_ratio))
     end
 
-    -- Close previous viewer BEFORE creating new image to avoid memory issues
+    -- Reuse existing viewer if available instead of closing to prevent flash of full page
     if self._current_imgviewer then 
-        logger.info("DynamicPanelZoom: Closing previous PanelViewer")
-        UIManager:close(self._current_imgviewer)
-        self._current_imgviewer = nil
+        logger.info("DynamicPanelZoom: Updating existing PanelViewer")
+        self._current_imgviewer:updateReadingDirection(self:getEffectiveReadingDirection())
+        self._current_imgviewer:updateCustomPosition(custom_position)
+        self._current_imgviewer:updatePanelAspectRatio(panel_aspect_ratio)
+        self._current_imgviewer:updateImage(image)
+        self._current_imgviewer:update()
+        
+        -- Start preloading the next panel after a short delay
+        UIManager:scheduleIn(0.2, function()
+            self:preloadNextPanel()
+        end)
+        return true
     end
     
     -- Create new PanelViewer instance with our custom implementation

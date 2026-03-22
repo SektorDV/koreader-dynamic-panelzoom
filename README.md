@@ -11,6 +11,10 @@ No pre-processing, external scripts, or JSON files required—it analyzes the pa
 - **🔄 Reading Direction:** Supports Left-to-Right (Western) and Right-to-Left (Manga).
 - **🔍 Hold-to-Zoom Mode:** Long-press on any panel to instantly enter a free-zoom state with smart text padding to read cut-off speech bubbles or admire wide landscape art.
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/839285a6-00c0-4308-82cb-ba637a2e0284" width="400" alt="Demo GIF showing Dynamic Panel Zoom in action">
+</p>
+
 ## Installation
 1. Download the latest `dynamic_panelzoom.koplugin.zip` from [Releases](https://github.com/JorgeTheFox/koreader-dynamic-panelzoom/releases).
 2. Unzip and copy the `dynamic_panelzoom.koplugin` folder to your KOReader's `plugins/` directory.

@@ -376,6 +376,12 @@ function PanelViewer:updateCustomPosition(custom_position)
     logger.info("PanelViewer: Custom position updated and display rect recalculated")
 end
 
+function PanelViewer:updatePanelAspectRatio(ratio)
+    self.panel_aspect_ratio = ratio
+    self._is_dirty = true
+    logger.info(string.format("PanelViewer: Panel aspect ratio updated to %.3f", ratio or 0))
+end
+
 function PanelViewer:freeResources()
     -- BEST: No separate scaled image to free (1:1 blitting)
     -- Only free the original if it's not externally managed
