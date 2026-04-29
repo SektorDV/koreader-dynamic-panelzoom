@@ -26,6 +26,7 @@ local PanelZoomIntegration = WidgetContainer:extend{
     _is_switching = false, -- Debounce guard to prevent fast tap issues
     _is_changing_page = false, -- True while a page change is in progress
     _page_change_diff = nil, -- Direction of current page change (+1 or -1)
+    _page_change_nonce = 0, -- Monotonic token to prevent stale fallback completion
     _original_panel_zoom_handler = nil, -- Store original panel zoom handler
     _original_ocr_handler = nil, -- Store original OCR handler
     _original_ocr_menu_enabled = nil, -- Store original OCR menu state
@@ -35,6 +36,7 @@ local PanelZoomIntegration = WidgetContainer:extend{
     zoom_margin_percent = 0.05, -- Default 5% extra margin for the free zoom mode
     standard_margin_percent = 0.0, -- Default 0% extra margin for standard panel-by-panel navigation
     show_adjacent_panels = true,   -- Show adjacent content (Smart Fill)
+    flash_refresh_on_switch = true, -- Use full-screen flash refresh for panel switches
     zoom_initial_scale = 1.2, -- Default 1.2x initial software scale for the free zoom mode
 }
 
@@ -518,6 +520,8 @@ function PanelZoomIntegration:changePage(diff)
     -- Save current state for the event-driven flow
     self._is_changing_page = true
     self._page_change_diff = diff
+    self._page_change_nonce = self._page_change_nonce + 1
+    local page_change_nonce = self._page_change_nonce
 
     -- FLASH PREVENTION: Suppress E-Ink screen refreshes while KOReader
     -- renders the new page underneath our PanelViewer.
@@ -530,6 +534,17 @@ function PanelZoomIntegration:changePage(diff)
         if UIManager.currently_scrolling then
             logger.warn("DynamicPanelZoom: Safety net restored currently_scrolling to false")
             UIManager.currently_scrolling = false
+        end
+    end)
+
+    -- Robustness fallback:
+    -- Some paths/devices may fail to emit PageUpdate after onGotoViewRel().
+    -- If that happens, _is_changing_page stays true and tap navigation appears frozen.
+    -- Force the completion path for the *current* page-change token only.
+    UIManager:scheduleIn(0.8, function()
+        if self._is_changing_page and self._page_change_nonce == page_change_nonce then
+            logger.warn("DynamicPanelZoom: PageUpdate timeout, forcing page-change completion fallback")
+            self:_onPageChangeComplete(nil)
         end
     end)
 
@@ -558,6 +573,10 @@ end
 -- processing before we load our panel.
 function PanelZoomIntegration:_onPageChangeComplete(new_page_no)
     UIManager:nextTick(function()
+        if not self._is_changing_page then
+            return
+        end
+
         -- Restore normal refresh behavior now that we're ready to show our panel
         UIManager.currently_scrolling = false
         -- Prevent the partial->full flash promotion counter from triggering
@@ -655,14 +674,75 @@ function PanelZoomIntegration:onIntegratedPanelZoom(arg, ges)
     end
 
     if #self.current_panels > 0 then
-        -- Initial launch of Panel Viewer on a page
-        -- In LTR, start at index 1 (top-left). In RTL, start at index 1 (top-right).
-        self.current_panel_index = 1
+        -- Start from the panel that was actually pressed in the full-page view.
+        -- Fallback to the first panel if gesture coordinates are unavailable.
+        self.current_panel_index = self:getPanelIndexFromGesture(actual_ges) or 1
         return self:displayCurrentPanel()
     end
 
     logger.warn("DynamicPanelZoom: No panels found for this page in JSON.")
     return false
+end
+
+function PanelZoomIntegration:getPanelIndexFromGesture(ges)
+    if not ges or not ges.pos or #self.current_panels == 0 then
+        return nil
+    end
+
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+    if not screen_w or not screen_h or screen_w <= 0 or screen_h <= 0 then
+        return nil
+    end
+
+    -- Gesture positions are in screen coordinates; panels are normalized [0..1].
+    -- We use normalized touch coordinates to pick the panel under the press.
+    local tx = math.max(0, math.min(1, ges.pos.x / screen_w))
+    local ty = math.max(0, math.min(1, ges.pos.y / screen_h))
+
+    local best_inside_index = nil
+    local best_inside_area = nil
+
+    for i, panel in ipairs(self.current_panels) do
+        local inside_x = tx >= panel.x and tx <= (panel.x + panel.w)
+        local inside_y = ty >= panel.y and ty <= (panel.y + panel.h)
+        if inside_x and inside_y then
+            local area = panel.w * panel.h
+            if not best_inside_area or area < best_inside_area then
+                best_inside_area = area
+                best_inside_index = i
+            end
+        end
+    end
+
+    if best_inside_index then
+        logger.info(string.format(
+            "DynamicPanelZoom: Gesture mapped to panel index %d at touch %.3f,%.3f",
+            best_inside_index, tx, ty
+        ))
+        return best_inside_index
+    end
+
+    -- If touch lands in gutter/margin, choose nearest panel center.
+    local nearest_index = 1
+    local nearest_dist2 = math.huge
+    for i, panel in ipairs(self.current_panels) do
+        local cx = panel.x + (panel.w / 2)
+        local cy = panel.y + (panel.h / 2)
+        local dx = tx - cx
+        local dy = ty - cy
+        local dist2 = dx * dx + dy * dy
+        if dist2 < nearest_dist2 then
+            nearest_dist2 = dist2
+            nearest_index = i
+        end
+    end
+
+    logger.info(string.format(
+        "DynamicPanelZoom: Touch outside panels, using nearest panel index %d",
+        nearest_index
+    ))
+    return nearest_index
 end
 
 function PanelZoomIntegration:importToggleZoomPanels()
@@ -1123,6 +1203,7 @@ function PanelZoomIntegration:displayCurrentPanel()
         self._current_imgviewer:updateReadingDirection(self:getEffectiveReadingDirection())
         self._current_imgviewer:updateCustomPosition(custom_position)
         self._current_imgviewer:updatePanelAspectRatio(panel_aspect_ratio)
+        self._current_imgviewer:updateFlashRefreshMode(self.flash_refresh_on_switch)
         self._current_imgviewer:updateImage(image)
         self._current_imgviewer:update()
         
@@ -1142,6 +1223,7 @@ function PanelZoomIntegration:displayCurrentPanel()
         reading_direction = self:getEffectiveReadingDirection(),
         custom_position = custom_position,  -- Pass custom position for center matching
         panel_aspect_ratio = panel_aspect_ratio,  -- Pass panel aspect ratio for border logic
+        flash_refresh_on_switch = self.flash_refresh_on_switch,
         onTapRight = function() self:handleTapRight() end,
         onTapLeft = function() self:handleTapLeft() end,
         onClose = function() 
@@ -1157,15 +1239,19 @@ function PanelZoomIntegration:displayCurrentPanel()
     self._current_imgviewer = panel_viewer
     logger.info("DynamicPanelZoom: Showing new PanelViewer")
     UIManager:show(panel_viewer)
-    
-    -- Use "ui" refresh for initial panel display to avoid E-Ink flash.
-    -- "flashui" would cause a visible full-screen flash on E-Ink devices.
-    -- Dithering is still enabled for image quality on grayscale E-Ink displays.
-    UIManager:setDirty(panel_viewer, function()
-        return "ui", panel_viewer.dimen, Screen.sw_dithering  -- Enable dithering for E-ink
-    end)
-    
-    logger.info("DynamicPanelZoom: New PanelViewer shown with flash-free refresh")
+
+    -- Initial entry from full-page view is where ghosting is most noticeable.
+    -- When enabled, force a full-screen flash waveform refresh for this first draw.
+    if self.flash_refresh_on_switch then
+        panel_viewer._is_dirty = true
+        UIManager:setDirty(nil, function()
+            return "flashui", nil, Screen.sw_dithering
+        end)
+        logger.info("DynamicPanelZoom: New PanelViewer shown with full-screen flash refresh")
+    else
+        panel_viewer:update()
+        logger.info("DynamicPanelZoom: New PanelViewer shown with ui refresh")
+    end
     
     -- Start preloading the next panel after a short delay
     UIManager:scheduleIn(0.2, function()
@@ -1225,6 +1311,16 @@ function PanelZoomIntegration:setupPanelZoomMenuIntegration()
             table.insert(menu_items, 2, {
                 text = _("Standard panel settings"),
                 sub_item_table = {
+                    {
+                        text = _("Full refresh on panel switch"),
+                        checked_func = function() return self.flash_refresh_on_switch end,
+                        callback = function()
+                            self.flash_refresh_on_switch = not self.flash_refresh_on_switch
+                            if self._current_imgviewer and self._current_imgviewer.updateFlashRefreshMode then
+                                self._current_imgviewer:updateFlashRefreshMode(self.flash_refresh_on_switch)
+                            end
+                        end,
+                    },
                     {
                         text = _("Show adjacent page content"),
                         checked_func = function() return self.show_adjacent_panels end,
