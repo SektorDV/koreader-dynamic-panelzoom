@@ -33,6 +33,7 @@ local PanelViewer = InputContainer:extend{
     -- Panel-specific properties
     reading_direction = "ltr",
     panel_aspect_ratio = nil,  -- Panel aspect ratio from main.lua
+    flash_refresh_on_switch = true, -- Full-screen refresh mode to reduce E-Ink ghosting
     
     -- Callbacks for navigation
     onNext = nil,
@@ -355,14 +356,17 @@ function PanelViewer:updateImage(new_image)
 end
 
 function PanelViewer:update()
-    -- KOADER MUFPDF LOGIC: Use proper refresh types like ImageViewer
-    -- For panel viewing, we want "ui" refresh for smooth transitions
-    -- and "flashui" for initial display to ensure crisp rendering
+    -- Panel switches on E-Ink can use a flash waveform refresh to clear
+    -- ghosting from the previously shown panel.
     self._is_dirty = true
     UIManager:setDirty(self, function()
-        return "ui", self.dimen, Screen.sw_dithering  -- Enable dithering for E-ink
+        local mode = self.flash_refresh_on_switch and "flashui" or "ui"
+        return mode, self.dimen, Screen.sw_dithering
     end)
-    logger.info("PanelViewer: Update called with KOReader refresh logic")
+    logger.info(string.format(
+        "PanelViewer: Update called with %s refresh mode",
+        self.flash_refresh_on_switch and "flashui" or "ui"
+    ))
 end
 
 function PanelViewer:updateReadingDirection(direction)
@@ -381,6 +385,14 @@ function PanelViewer:updatePanelAspectRatio(ratio)
     self.panel_aspect_ratio = ratio
     self._is_dirty = true
     logger.info(string.format("PanelViewer: Panel aspect ratio updated to %.3f", ratio or 0))
+end
+
+function PanelViewer:updateFlashRefreshMode(enabled)
+    self.flash_refresh_on_switch = enabled ~= false
+    logger.info(string.format(
+        "PanelViewer: Flash refresh on switch %s",
+        self.flash_refresh_on_switch and "enabled" or "disabled"
+    ))
 end
 
 function PanelViewer:freeResources()
